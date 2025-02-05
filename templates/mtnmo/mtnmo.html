@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col-6 text-center">
+            <h1 class="mt-5">Mtn mobile money works</h1>
+            <h3 class="mt-3">Token: {{ token }}</h3>
+            <a href="/mtnmo/collect/" class="btn btn-primary mt-3">Mtn-Collect</a>
+            <a href="/mtnmo/disbursement/" class="btn btn-secondary mt-3">Mtn-Disburse</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

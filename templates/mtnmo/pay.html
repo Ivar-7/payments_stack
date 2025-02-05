@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="container"></div>
+    <div class="row justify-content-center">
+        <div class="col-6">
+            <h1 class="text-center mt-5">Make a Payment</h1>
+            <form method="post" class="mt-4">
+                {% csrf_token %}
+                <div class="form-group">
+                    <label for="amount">Amount:</label>
+                    <input type="text" id="amount" name="amount" class="form-control" required>
+                </div>
+                <div class="form-group">
+                    <label for="phone_number">Phone Number:</label>
+                    <input type="text" id="phone_number" name="phone_number" class="form-control" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Submit</button>
+            </form>
+            {% if response %}
+                <h2 class="mt-4">Transaction Successful</h2>
+                <h3 class="mt-4">MoMo status code: {{ response.status_code }}</h3>
+                <h3>MoMo Ref: {{ response.ref }}</h3>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

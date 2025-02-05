@@ -1,0 +1,1 @@
+web: gunicorn djangoTik.wsgi --log-file -
