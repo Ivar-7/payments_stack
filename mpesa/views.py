@@ -1,173 +1,260 @@
+"""
+M-Pesa Views - Clean Modular Implementation
+Uses individual service classes for better separation of concerns
+"""
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-import requests
-import datetime
-import base64
-from requests.auth import HTTPBasicAuth
-from decouple import config
-import json
-from .models import MpesaTransaction
+from django.views.decorators.http import require_http_methods
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+
+from .services import CallbackService
+
 
 def index(request):
+    """Simple index page"""
     return render(request, 'index.html')
 
-@csrf_exempt
-def mpesa_payment(request):
-    if request.method == 'POST':
-        print("Received M-Pesa payment request")
-        # Handle form submission
-        if request.content_type == 'application/json':
-            # API call (JSON data)
-            data = json.loads(request.body)
-            phone = data.get('phone')
-            amount = data.get('amount')
-        else:
-            # Form submission (form data)
-            phone = request.POST.get('phone')
-            amount = request.POST.get('amount')
 
-        # print(f"Phone: {phone}, Amount: {amount}")
-        # print(f"Request content type: {request.content_type}")
-        # print(f"Request POST data: {request.POST}")
-
-        # Validate phone number format
-        if not phone or not phone.startswith('254') or len(phone) != 12:
-            error_response = {
-                "ResponseCode": "1",
-                "ResponseDescription": "Invalid phone number. Use format 254XXXXXXXXX",
-                "errorMessage": "Phone number must be in format 254XXXXXXXXX"
-            }
-            if request.content_type != 'application/json':
-                return render(request, 'index.html', {'response': error_response})
-            return JsonResponse(error_response)
-
-        # Validate amount
-        try:
-            amount_int = int(amount)
-            if amount_int < 1:
-                raise ValueError("Amount must be at least 1")
-        except (ValueError, TypeError):
-            error_response = {
-                "ResponseCode": "1",
-                "ResponseDescription": "Invalid amount. Must be a positive number",
-                "errorMessage": "Amount must be a positive number"
-            }
-            if request.content_type != 'application/json':
-                return render(request, 'index.html', {'response': error_response})
-            return JsonResponse(error_response)
-
-        consumer_key = config('CONSUMER_KEY')
-        consumer_secret = config('CONSUMER_SECRET')
-        api_URL = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
-        
-        try:
-            r = requests.get(api_URL, auth=HTTPBasicAuth(consumer_key, consumer_secret))
-            token_data = r.json()
-            access_token = "Bearer " + token_data['access_token']
-            # print(f"Access Token: {access_token}")
-
-            timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-            passkey = config('PASSKEY')
-            business_short_code = config('BUSINESS_SHORTCODE')
-            data_to_encode = business_short_code + passkey + timestamp
-            encoded = base64.b64encode(data_to_encode.encode())
-            password = encoded.decode('utf-8')
-
-            payload = {
-                "BusinessShortCode": business_short_code,
-                "Password": password,
-                "Timestamp": timestamp,
-                "TransactionType": "CustomerPayBillOnline",
-                "Amount": amount,
-                "PartyA": phone,
-                "PartyB": business_short_code,
-                "PhoneNumber": phone,
-                "CallBackURL": "https://skyfield-app-wuuco.ondigitalocean.app/mpesa/mpesa_callback/",
-                "AccountReference": "Test",
-                "TransactionDesc": "Test"
-            }
-
-            headers = {
-                "Authorization": access_token,
-                "Content-Type": "application/json"
-            }
-
-            # print(f"Payload: {payload}")
-
-            response = requests.post("https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest", json=payload, headers=headers)
-            response_data = response.json()
-            # print(f"M-Pesa API Response: {response_data}")
-            
-            # For form submissions, render template with response
-            if request.content_type != 'application/json':
-                # Add formatted response for debug display
-                response_data['debug_json'] = json.dumps(response_data, indent=2)
-                # print(f"Rendering template with response: {response_data}")
-                return render(request, 'index.html', {'response': response_data})
-            
-            # For API calls, return JSON
-            return JsonResponse(response_data)
-            
-        except requests.exceptions.RequestException as e:
-            error_response = {
-                "ResponseCode": "1", 
-                "ResponseDescription": f"Network error: {str(e)}",
-                "errorMessage": "Failed to connect to M-Pesa API"
-            }
-            if request.content_type != 'application/json':
-                return render(request, 'index.html', {'response': error_response})
-            return JsonResponse(error_response)
-        except json.JSONDecodeError as e:
-            error_response = {
-                "ResponseCode": "1",
-                "ResponseDescription": "Invalid response from M-Pesa API", 
-                "errorMessage": "Could not parse API response"
-            }
-            if request.content_type != 'application/json':
-                return render(request, 'index.html', {'response': error_response})
-            return JsonResponse(error_response)
-        except KeyError as e:
-            error_response = {
-                "ResponseCode": "1",
-                "ResponseDescription": f"Missing key in API response: {str(e)}",
-                "errorMessage": f"Key '{e}' not found in the response."
-            }
-            if request.content_type != 'application/json':
-                return render(request, 'index.html', {'response': error_response})
-            return JsonResponse(error_response)
-        except Exception as e:
-            error_response = {
-                "ResponseCode": "1",
-                "ResponseDescription": f"Unexpected error: {str(e)}",
-                "errorMessage": str(e)
-            }
-            if request.content_type != 'application/json':
-                return render(request, 'index.html', {'response': error_response})
-            return JsonResponse(error_response)
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def stk_push_payment(request):
+    """
+    Initiate STK Push payment (Customer pays Business)
+    Used for: Product purchases, subscription payments, etc.
+    """
+    from .services.stk_push import STKPushService
+    from .services.transaction import TransactionService
     
-    # Handle GET request - show the form
-    return render(request, 'index.html')
+    try:
+        stk_service = STKPushService()
+        
+        # Extract and validate data
+        phone = request.data.get('phone')
+        amount = request.data.get('amount')
+        payment_type = request.data.get('payment_type', 'product')
+        product_id = request.data.get('product_id')
+        subscription_plan_id = request.data.get('subscription_plan_id')
+        account_reference = request.data.get('account_reference', f'SKYFIELD-{request.user.id}')
+        transaction_desc = request.data.get('transaction_desc', 'Payment for Skyfield services')
+        
+        # Validate required fields
+        if not phone or not amount:
+            return Response({
+                'error': 'Phone number and amount are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Make payment request
+        result = stk_service.initiate_payment(
+            phone=phone,
+            amount=amount,
+            payment_type=payment_type,
+            product_id=product_id,
+            subscription_plan_id=subscription_plan_id,
+            account_reference=account_reference,
+            transaction_desc=transaction_desc,
+            user_id=request.user.id
+        )
+        
+        # Format response
+        if result.get('ResponseCode') == '0':
+            return Response({
+                'success': True,
+                'message': 'Payment request sent successfully',
+                'data': {
+                    'checkout_request_id': result.get('CheckoutRequestID'),
+                    'merchant_request_id': result.get('MerchantRequestID'),
+                    'customer_message': result.get('CustomerMessage')
+                }
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                'error': result.get('ResponseDescription', 'Payment initiation failed')
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({
+            'error': f'Payment initiation failed: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_money(request):
+    """
+    Send money to customer (B2C Transfer - Business pays Customer)
+    Used for: Referral payouts, refunds, rewards, etc.
+    """
+    from .services.b2c_transfer import B2CTransferService
+    
+    try:
+        b2c_service = B2CTransferService()
+        
+        # Extract and validate data
+        phone = request.data.get('phone')
+        amount = request.data.get('amount')
+        occasion = request.data.get('occasion', 'Money transfer')
+        remarks = request.data.get('remarks', 'Payment from Skyfield')
+        command_id = request.data.get('command_id', 'BusinessPayment')
+        reference = request.data.get('reference')
+        
+        # Validate required fields
+        if not phone or not amount:
+            return Response({
+                'error': 'Phone number and amount are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Make transfer request
+        result = b2c_service.send_money(
+            phone=phone,
+            amount=amount,
+            occasion=occasion,
+            remarks=remarks,
+            command_id=command_id,
+            user_id=request.user.id,
+            reference=reference
+        )
+        
+        # Format response
+        if result.get('ResponseCode') == '0':
+            return Response({
+                'success': True,
+                'message': 'Money transfer initiated successfully',
+                'data': {
+                    'conversation_id': result.get('ConversationID'),
+                    'originator_conversation_id': result.get('OriginatorConversationID'),
+                    'transaction_id': result.get('transaction_id')
+                }
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                'error': result.get('ResponseDescription', 'Money transfer failed')
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        return Response({
+            'error': f'Money transfer failed: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def payment_status(request):
+    """Get payment status by checkout_request_id or conversation_id"""
+    from .services.callback import CallbackService
+    
+    try:
+        callback_service = CallbackService()
+        checkout_request_id = request.GET.get('checkout_request_id')
+        conversation_id = request.GET.get('conversation_id')
+        
+        if not checkout_request_id and not conversation_id:
+            return Response({
+                'error': 'Either checkout_request_id or conversation_id is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        result = callback_service.get_transaction_status(
+            checkout_request_id=checkout_request_id,
+            conversation_id=conversation_id
+        )
+        
+        if result.get('status') == 'error':
+            return Response({
+                'error': result.get('message')
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        return Response(result, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'Failed to get payment status: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def user_transactions(request):
+    """Get user's transaction history"""
+    from .services.transaction import TransactionService
+    
+    try:
+        transaction_service = TransactionService()
+        transaction_type = request.GET.get('type')  # stk_push, b2c_transfer, or None for all
+        limit = int(request.GET.get('limit', 50))
+        
+        transactions = transaction_service.get_user_transactions(
+            user_id=request.user.id,
+            transaction_type=transaction_type,
+            limit=limit
+        )
+        
+        return Response({
+            'success': True,
+            'data': {
+                'transactions': transactions,
+                'count': len(transactions)
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'Failed to get transactions: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def transaction_summary(request):
+    """Get transaction summary for user"""
+    from .services.transaction import TransactionService
+    
+    try:
+        transaction_service = TransactionService()
+        days = int(request.GET.get('days', 30))
+        
+        summary = transaction_service.get_transaction_summary(
+            user_id=request.user.id,
+            days=days
+        )
+        
+        return Response({
+            'success': True,
+            'data': summary
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({
+            'error': f'Failed to get transaction summary: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# Callback endpoints (no authentication required)
+@csrf_exempt
+@require_http_methods(["POST"])
+def mpesa_callback(request):
+    """Handle STK Push callback from Safaricom"""
+    callback_service = CallbackService()
+    return callback_service.process_stk_callback_request(request)
+
 
 @csrf_exempt
-def mpesa_callback(request):
-    if request.method == 'POST':
-        data = json.loads(request.body)
+@require_http_methods(["POST"])
+def b2c_result_callback(request):
+    """Handle B2C result callback from Safaricom"""
+    callback_service = CallbackService()
+    return callback_service.process_b2c_result_request(request)
 
-        items = {}
-        if 'CallbackMetadata' in data['Body']['stkCallback']:
-            items = {item['Name']: item['Value'] for item in data['Body']['stkCallback']['CallbackMetadata']['Item']}
 
-        MpesaTransaction.objects.create(
-            merchant_request_id=data['Body']['stkCallback']['MerchantRequestID'],
-            checkout_request_id=data['Body']['stkCallback']['CheckoutRequestID'],
-            result_code=data['Body']['stkCallback']['ResultCode'],
-            result_desc=data['Body']['stkCallback']['ResultDesc'],
-            amount=items.get('Amount'),
-            mpesa_receipt_number=items.get('MpesaReceiptNumber'),
-            transaction_date=items.get('TransactionDate'),
-            phone_number=items.get('PhoneNumber'),
-        )
-
-        return JsonResponse({'result_code': 0, 'result_desc': 'Success'})
-    return JsonResponse({'result_code': 1, 'result_desc': 'Failed, not a POST request'})
+@csrf_exempt
+@require_http_methods(["POST"])
+def b2c_timeout_callback(request):
+    """Handle B2C timeout callback from Safaricom"""
+    callback_service = CallbackService()
+    return callback_service.process_b2c_timeout_request(request)
