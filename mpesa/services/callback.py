@@ -354,7 +354,7 @@ class CallbackService:
                 subscription_id = parts[-1]
                 
                 # Import here to avoid circular imports
-                from skyfieldApp.models import Subscription, Referral
+                from coreapis.models import Subscription, Referral
                 from django.utils import timezone
                 
                 try:

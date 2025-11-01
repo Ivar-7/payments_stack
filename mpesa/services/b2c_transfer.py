@@ -7,6 +7,7 @@ import json
 from requests.auth import HTTPBasicAuth
 from decouple import config
 from ..models import MpesaB2CTransaction
+from django.conf import settings
 
 
 class B2CTransferService:
@@ -15,18 +16,29 @@ class B2CTransferService:
         self.consumer_secret = config('CONSUMER_SECRET')
         self.business_shortcode = config('B2C_SHORTCODE', default=config('BUSINESS_SHORTCODE'))
         self.initiator_name = config('INITIATOR_NAME', default='testapi')
-        self.security_credential = config('SECURITY_CREDENTIAL', default='Safaricom999!*!')
-        self.queue_timeout_url = config('B2C_QUEUE_TIMEOUT_URL', 
-                                      default='https://skyfield-app-wuuco.ondigitalocean.app/mpesa/b2c-timeout/')
-        self.result_url = config('B2C_RESULT_URL', 
-                               default='https://skyfield-app-wuuco.ondigitalocean.app/mpesa/b2c-result/')
+        # Require credentials and callback URLs from environment (no hard-coded defaults)
+        self.security_credential = config('SECURITY_CREDENTIAL', default=None)
+        if not self.security_credential:
+            raise ValueError('SECURITY_CREDENTIAL must be set in environment variables')
+
+        self.queue_timeout_url = config('B2C_QUEUE_TIMEOUT_URL', default=None)
+        self.result_url = config('B2C_RESULT_URL', default=None)
+        if not self.queue_timeout_url or not self.result_url:
+            raise ValueError('B2C_QUEUE_TIMEOUT_URL and B2C_RESULT_URL must be set in environment variables')
+
+    def _base_host(self) -> str:
+        return 'https://sandbox.safaricom.co.ke' if getattr(settings, 'DEBUG', False) else 'https://api.safaricom.co.ke'
         
     def get_access_token(self):
         """Get access token from Safaricom API"""
-        api_url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
+        api_url = f"{self._base_host()}/oauth/v1/generate?grant_type=client_credentials"
         
         try:
-            response = requests.get(api_url, auth=HTTPBasicAuth(self.consumer_key, self.consumer_secret))
+            response = requests.get(
+                api_url,
+                auth=HTTPBasicAuth(self.consumer_key, self.consumer_secret),
+                timeout=15
+            )
             response.raise_for_status()
             token_data = response.json()
             return f"Bearer {token_data['access_token']}"
@@ -98,9 +110,10 @@ class B2CTransferService:
         try:
             # Make API request
             response = requests.post(
-                "https://sandbox.safaricom.co.ke/mpesa/b2c/v1/paymentrequest",
+                f"{self._base_host()}/mpesa/b2c/v1/paymentrequest",
                 json=payload,
-                headers=headers
+                headers=headers,
+                timeout=20
             )
             response.raise_for_status()
             response_data = response.json()

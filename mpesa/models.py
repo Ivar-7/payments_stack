@@ -3,7 +3,7 @@ from django.db import models
 class MpesaTransaction(models.Model):
     merchant_request_id = models.CharField(max_length=50)
     checkout_request_id = models.CharField(max_length=50)
-    result_code = models.IntegerField()
+    result_code = models.IntegerField(null=True, blank=True)
     result_desc = models.CharField(max_length=255)
     amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     mpesa_receipt_number = models.CharField(max_length=50, null=True, blank=True)

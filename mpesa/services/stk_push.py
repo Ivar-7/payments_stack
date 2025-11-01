@@ -9,6 +9,7 @@ import json
 from requests.auth import HTTPBasicAuth
 from decouple import config
 from ..models import MpesaTransaction
+from django.conf import settings
 
 
 class STKPushService:
@@ -17,15 +18,25 @@ class STKPushService:
         self.consumer_secret = config('CONSUMER_SECRET')
         self.passkey = config('PASSKEY')
         self.business_shortcode = config('BUSINESS_SHORTCODE')
-        # Ensure default matches backend route name `stk-callback/` to avoid 404s when env var is not set
-        self.callback_url = config('CALLBACK_URL', default='https://skyfield-app-wuuco.ondigitalocean.app/mpesa/stk-callback/')
+        # Require callback URL from environment (no hard-coded defaults)
+        self.callback_url = config('CALLBACK_URL', default=None)
+        if not self.callback_url:
+            raise ValueError('CALLBACK_URL must be set in environment variables')
+
+    def _base_host(self) -> str:
+        """Return Safaricom API host based on DEBUG flag."""
+        return 'https://api.safaricom.co.ke' if getattr(settings, 'DEBUG', False) else 'https://api.safaricom.co.ke'
         
     def get_access_token(self):
         """Get access token from Safaricom API"""
-        api_url = "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
+        api_url = f"{self._base_host()}/oauth/v1/generate?grant_type=client_credentials"
         
         try:
-            response = requests.get(api_url, auth=HTTPBasicAuth(self.consumer_key, self.consumer_secret))
+            response = requests.get(
+                api_url,
+                auth=HTTPBasicAuth(self.consumer_key, self.consumer_secret),
+                timeout=15
+            )
             response.raise_for_status()
             token_data = response.json()
             return f"Bearer {token_data['access_token']}"
@@ -90,9 +101,10 @@ class STKPushService:
         try:
             # Make API request
             response = requests.post(
-                "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest", 
-                json=payload, 
-                headers=headers
+                f"{self._base_host()}/mpesa/stkpush/v1/processrequest",
+                json=payload,
+                headers=headers,
+                timeout=20
             )
             response.raise_for_status()
             response_data = response.json()
@@ -102,7 +114,7 @@ class STKPushService:
                 MpesaTransaction.objects.create(
                     merchant_request_id=response_data.get('MerchantRequestID', ''),
                     checkout_request_id=response_data.get('CheckoutRequestID', ''),
-                    result_code=0,  # Initially pending
+                    result_code=None,  # Pending until callback updates
                     result_desc='Payment request initiated',
                     amount=amount,
                     phone_number=phone,

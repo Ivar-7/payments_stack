@@ -11,7 +11,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from .services import CallbackService
+from .services.callback import CallbackService
 
 
 def index(request):
@@ -148,8 +148,6 @@ def send_money(request):
 @permission_classes([IsAuthenticated])
 def payment_status(request):
     """Get payment status by checkout_request_id or conversation_id"""
-    from .services.callback import CallbackService
-    
     try:
         callback_service = CallbackService()
         checkout_request_id = request.GET.get('checkout_request_id')

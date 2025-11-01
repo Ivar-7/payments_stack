@@ -54,14 +54,12 @@ class TransactionService:
                     'id': txn.id,
                     'type': 'b2c_transfer',
                     'status': self._get_b2c_status(txn),
-                    'amount': float(txn.amount),
+                    'amount': float(txn.amount) if txn.amount is not None else None,
                     'phone_number': txn.phone_number,
-                    'command_id': txn.command_id,
-                    'remarks': txn.remarks,
-                    'occasion': txn.occasion,
                     'mpesa_receipt_number': txn.mpesa_receipt_number,
-                    'transaction_date': txn.transaction_date,
-                    'result_description': txn.result_description,
+                    'reference': getattr(txn, 'reference', None),
+                    'remarks': getattr(txn, 'remarks', None),
+                    'result_description': getattr(txn, 'result_description', None),
                     'created_at': txn.created_at.isoformat(),
                     'updated_at': txn.updated_at.isoformat()
                 })
