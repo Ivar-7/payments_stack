@@ -1,13 +1,27 @@
 from rest_framework import serializers
+from .config import PayHeroSettings
+
+
+class _ChannelDefaultMixin:
+    def _apply_channel_default(self, attrs):
+        # If client omitted channel_id, try to inject from settings
+        if attrs.get("channel_id") in (None, ""):
+            try:
+                default = PayHeroSettings.load().default_channel_id
+            except Exception:
+                default = None
+            if default is not None:
+                attrs["channel_id"] = default
+        return attrs
 
 class TopupSerializer(serializers.Serializer):
     amount = serializers.IntegerField(min_value=1)
     phone_number = serializers.CharField(max_length=25)
 
-class InitiatePaymentSerializer(serializers.Serializer):
+class InitiatePaymentSerializer(_ChannelDefaultMixin, serializers.Serializer):
     amount = serializers.IntegerField(min_value=1)
     phone_number = serializers.CharField(max_length=25)
-    channel_id = serializers.IntegerField(min_value=1)
+    channel_id = serializers.IntegerField(min_value=1, required=False)
     provider = serializers.CharField(max_length=40)
     reference = serializers.CharField(max_length=120, required=False, allow_blank=True)
     external_reference = serializers.CharField(max_length=120, required=False, allow_blank=True)
@@ -16,14 +30,40 @@ class InitiatePaymentSerializer(serializers.Serializer):
     credential_id = serializers.CharField(max_length=120, required=False, allow_blank=True)
     network_code = serializers.CharField(max_length=10, required=False, allow_blank=True)
 
-class WithdrawMobileSerializer(serializers.Serializer):
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # Prefer PAYHERO_PAYMENTS_CHANNEL_ID, then PAYHERO_CHANNEL_ID
+        if attrs.get("channel_id") in (None, ""):
+            try:
+                settings = PayHeroSettings.load()
+                default = settings.payments_channel_id or settings.default_channel_id
+            except Exception:
+                default = None
+            if default is not None:
+                attrs["channel_id"] = default
+        return attrs
+
+class WithdrawMobileSerializer(_ChannelDefaultMixin, serializers.Serializer):
     amount = serializers.IntegerField(min_value=1)
     phone_number = serializers.CharField(max_length=25)
     network_code = serializers.CharField(max_length=10)
-    channel_id = serializers.IntegerField(min_value=1)
+    channel_id = serializers.IntegerField(min_value=1, required=False)
     provider = serializers.CharField(max_length=40)
     external_reference = serializers.CharField(max_length=120, required=False, allow_blank=True)
     callback_url = serializers.URLField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # Prefer PAYHERO_WITHDRAW_CHANNEL_ID, then PAYHERO_CHANNEL_ID
+        if attrs.get("channel_id") in (None, ""):
+            try:
+                settings = PayHeroSettings.load()
+                default = settings.withdraw_channel_id or settings.default_channel_id
+            except Exception:
+                default = None
+            if default is not None:
+                attrs["channel_id"] = default
+        return attrs
 
 class TransactionsQuerySerializer(serializers.Serializer):
     page = serializers.IntegerField(min_value=1, required=False, default=1)

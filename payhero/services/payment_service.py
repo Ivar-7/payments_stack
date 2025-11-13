@@ -1,7 +1,14 @@
-from typing import Dict, Any, List
+"""PayHero payment service.
+
+Coordinates high-level operations across v2 (Basic auth) and Global (Bearer) endpoints.
+Pure orchestration lives here; HTTP specifics are in PayHeroApiClient.
+"""
+
+from typing import Dict, Any, List, Optional
 from django.db import transaction
 from ..models import PayHeroTransaction
 from .api_client import PayHeroApiClient
+from ..exceptions import PayHeroConfigurationError
 
 # v2 endpoint paths (Basic Auth)
 SERVICE_WALLET_BALANCE_PATH = "api/v2/wallets"  # GET ?wallet_type=service_wallet
@@ -18,7 +25,13 @@ GLOBAL_PAYMENTS_PATH = "api/global/payments"  # POST
 
 
 class PaymentService:
-    """Coordinates PayHero operations across v2 (Basic) and Global (Bearer) endpoints."""
+    """Coordinates PayHero operations across v2 (Basic) and Global (Bearer) endpoints.
+
+    This layer prepares payloads, triggers API calls through the client, and
+    records minimal transaction state where applicable. It intentionally does
+    not swallow upstream errors; those are handled at the API view layer for
+    consistent HTTP responses.
+    """
 
     def __init__(self, client: PayHeroApiClient | None = None):
         self.client = client or PayHeroApiClient()
@@ -27,8 +40,11 @@ class PaymentService:
     def get_service_wallet_balance(self) -> Dict[str, Any]:
         return self.client.request("GET", SERVICE_WALLET_BALANCE_PATH, params={"wallet_type": "service_wallet"}, basic=True)
 
-    def get_payment_channel_balance(self, channel_id: int) -> Dict[str, Any]:
-        path = PAYMENT_CHANNEL_BALANCE_PATH.format(channel_id=channel_id)
+    def get_payment_channel_balance(self, channel_id: Optional[int] = None) -> Dict[str, Any]:
+        channel = channel_id if channel_id is not None else self.client.settings.default_channel_id
+        if channel is None:
+            raise PayHeroConfigurationError("Missing channel_id and PAYHERO_CHANNEL_ID not configured")
+        path = PAYMENT_CHANNEL_BALANCE_PATH.format(channel_id=channel)
         return self.client.request("GET", path, basic=True)
 
     @transaction.atomic
@@ -48,14 +64,24 @@ class PaymentService:
         return {"reference": txn.reference, "status": txn.status, "raw": resp}
 
     @transaction.atomic
-    def initiate_payment(self, *, amount: int, phone_number: str, channel_id: int, provider: str,
+    def initiate_payment(self, *, amount: int, phone_number: str, channel_id: Optional[int] = None, provider: str,
                         reference: str | None = None, external_reference: str | None = None,
                         customer_name: str | None = None, callback_url: str | None = None,
                         credential_id: str | None = None, network_code: str | None = None) -> Dict[str, Any]:
+        """Initiate a customer payment.
+
+        Required: amount, phone_number, channel_id, provider.
+        Optional metadata fields are passed through to the upstream API when provided.
+        """
+        # For payments, prefer an explicit payments_channel_id, then default
+        settings = self.client.settings
+        channel = channel_id if channel_id is not None else (settings.payments_channel_id or settings.default_channel_id)
+        if channel is None:
+            raise PayHeroConfigurationError("Missing channel_id and PAYHERO_CHANNEL_ID not configured")
         payload: Dict[str, Any] = {
             "amount": amount,
             "phone_number": phone_number,
-            "channel_id": channel_id,
+            "channel_id": channel,
             "provider": provider,
         }
         # Optional fields
@@ -65,11 +91,11 @@ class PaymentService:
         if credential_id: payload["credential_id"] = credential_id
         if network_code: payload["network_code"] = network_code
         resp = self.client.request("POST", PAYMENTS_PATH, json=payload, basic=True)
-        ref = reference or resp.get("reference") or external_reference or f"pay-{channel_id}-{amount}"
+        ref = reference or resp.get("reference") or external_reference or f"pay-{channel}-{amount}"
         txn = PayHeroTransaction.objects.create(
             reference=ref,
             provider=provider,
-            channel_id=channel_id,
+            channel_id=channel,
             amount=amount,
             phone_number=phone_number,
             description=external_reference,
@@ -80,24 +106,30 @@ class PaymentService:
         return {"reference": txn.reference, "status": txn.status, "raw": resp}
 
     @transaction.atomic
-    def withdraw_mobile(self, *, amount: int, phone_number: str, network_code: str, channel_id: int,
+    def withdraw_mobile(self, *, amount: int, phone_number: str, network_code: str, channel_id: Optional[int] = None,
                         provider: str, external_reference: str | None = None, callback_url: str | None = None) -> Dict[str, Any]:
+        """Initiate a mobile B2C withdrawal to the recipient phone number."""
+        # For withdraw, prefer an explicit withdraw_channel_id, then default
+        settings = self.client.settings
+        channel = channel_id if channel_id is not None else (settings.withdraw_channel_id or settings.default_channel_id)
+        if channel is None:
+            raise PayHeroConfigurationError("Missing channel_id and PAYHERO_CHANNEL_ID not configured")
         payload: Dict[str, Any] = {
             "amount": amount,
             "phone_number": phone_number,
             "network_code": network_code,
             "channel": "mobile",
-            "channel_id": channel_id,
+            "channel_id": channel,
             "payment_service": "b2c",
         }
         if external_reference: payload["external_reference"] = external_reference
         if callback_url: payload["callback_url"] = callback_url
         resp = self.client.request("POST", WITHDRAW_PATH, json=payload, basic=True)
-        ref = external_reference or resp.get("merchant_reference") or f"wd-{channel_id}-{amount}"
+        ref = external_reference or resp.get("merchant_reference") or f"wd-{channel}-{amount}"
         txn = PayHeroTransaction.objects.create(
             reference=ref,
             provider=provider,
-            channel_id=channel_id,
+            channel_id=channel,
             amount=amount,
             phone_number=phone_number,
             description=external_reference,
@@ -108,10 +140,12 @@ class PaymentService:
         return {"reference": txn.reference, "status": txn.status, "raw": resp}
 
     def list_transactions(self, *, page: int = 1, per: int = 20) -> Dict[str, Any]:
+        """List transactions from the upstream PayHero v2 API (paginated)."""
         resp = self.client.request("GET", TRANSACTIONS_PATH, params={"page": page, "per": per}, basic=True)
         return resp
 
     def fetch_status(self, reference: str) -> Dict[str, Any]:
+        """Fetch latest status for a previously recorded local transaction and sync it."""
         txn = PayHeroTransaction.objects.get(reference=reference)
         resp = self.client.request("GET", TRANSACTION_STATUS_PATH, params={"reference": reference}, basic=True)
         remote_status = resp.get("status") or resp.get("Status")
@@ -131,6 +165,7 @@ class PaymentService:
                         country: str, reference: str, customer: Dict[str, Any], provider_config: Dict[str, Any],
                         vendor_config: Dict[str, Any], description: str | None = None, callback_url: str | None = None,
                         ipn_id: str | None = None) -> Dict[str, Any]:
+        """Initiate a global/bearer payment with full configuration blocks."""
         payload: Dict[str, Any] = {
             "request_type": request_type,
             "provider": provider,

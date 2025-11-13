@@ -14,18 +14,19 @@ from .serializers import (
 	TransactionStatusQuerySerializer,
 	GlobalPaymentSerializer,
 )
+from .http import safe_call, error_payload
 
 
 class ServiceWalletBalanceView(APIView):
 	def get(self, request):
 		service = PaymentService()
-		return Response(service.get_service_wallet_balance())
+		return safe_call(lambda: service.get_service_wallet_balance())
 
 
 class PaymentChannelBalanceView(APIView):
 	def get(self, request, channel_id: int):
 		service = PaymentService()
-		return Response(service.get_payment_channel_balance(channel_id))
+		return safe_call(lambda: service.get_payment_channel_balance(channel_id))
 
 
 class TopupServiceWalletView(APIView):
@@ -33,8 +34,7 @@ class TopupServiceWalletView(APIView):
 		serializer = TopupSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		service = PaymentService()
-		resp = service.topup_service_wallet(**serializer.validated_data)
-		return Response(resp, status=status.HTTP_201_CREATED)
+		return safe_call(lambda: service.topup_service_wallet(**serializer.validated_data), status_code=status.HTTP_201_CREATED)
 
 
 class InitiatePaymentView(APIView):
@@ -44,8 +44,7 @@ class InitiatePaymentView(APIView):
 		serializer = InitiatePaymentSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		service = PaymentService()
-		resp = service.initiate_payment(**serializer.validated_data)
-		return Response(resp, status=status.HTTP_201_CREATED)
+		return safe_call(lambda: service.initiate_payment(**serializer.validated_data), status_code=status.HTTP_201_CREATED)
 
 
 class WithdrawMobileView(APIView):
@@ -53,8 +52,7 @@ class WithdrawMobileView(APIView):
 		serializer = WithdrawMobileSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		service = PaymentService()
-		resp = service.withdraw_mobile(**serializer.validated_data)
-		return Response(resp, status=status.HTTP_201_CREATED)
+		return safe_call(lambda: service.withdraw_mobile(**serializer.validated_data), status_code=status.HTTP_201_CREATED)
 
 
 class TransactionsListView(APIView):
@@ -62,8 +60,7 @@ class TransactionsListView(APIView):
 		serializer = TransactionsQuerySerializer(data=request.query_params)
 		serializer.is_valid(raise_exception=True)
 		service = PaymentService()
-		resp = service.list_transactions(**serializer.validated_data)
-		return Response(resp)
+		return safe_call(lambda: service.list_transactions(**serializer.validated_data))
 
 
 class TransactionStatusView(APIView):
@@ -76,13 +73,16 @@ class TransactionStatusView(APIView):
 			return Response(status_payload)
 		except PayHeroTransaction.DoesNotExist:
 			return Response({"detail": "Unknown reference"}, status=404)
+		except Exception as e:  # noqa: BLE001
+			from .http import handle_exception
+			return handle_exception(e)
 
 
 class GlobalDiscoveryView(APIView):
 	def get(self, request):
 		country = request.query_params.get("country", "KE")
 		service = PaymentService()
-		return Response(service.global_discovery(country=country))
+		return safe_call(lambda: service.global_discovery(country=country))
 
 
 class GlobalPaymentView(APIView):
@@ -90,8 +90,7 @@ class GlobalPaymentView(APIView):
 		serializer = GlobalPaymentSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		service = PaymentService()
-		resp = service.global_payment(**serializer.validated_data)
-		return Response(resp, status=status.HTTP_201_CREATED)
+		return safe_call(lambda: service.global_payment(**serializer.validated_data), status_code=status.HTTP_201_CREATED)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -101,5 +100,6 @@ class WebhookReceiverView(APIView):
 	def post(self, request):
 		payload = request.data
 		# TODO: verify signature header when provider docs supplied
-		event = PayHeroWebhookEvent.objects.create(raw_payload=payload)
-		return Response({"status": "accepted", "event_id": event.pk})
+		def _save():
+			return {"status": "accepted", "event_id": PayHeroWebhookEvent.objects.create(raw_payload=payload).pk}
+		return safe_call(_save, status_code=200)
